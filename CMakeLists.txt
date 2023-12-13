@@ -4,6 +4,7 @@ project(VulkanTest)
 set(CMAKE_CXX_STANDARD 17)
 
 find_package(glfw3 REQUIRED)
+find_package(Vulkan REQUIRED)
 
 set(SOURCES
   main.cpp
@@ -16,4 +17,6 @@ endif()
 
 add_executable(${PROJECT_NAME} ${SOURCES})
 
-target_link_libraries(${PROJECT_NAME} glfw vulkan)
+target_include_directories(${PROJECT_NAME} PRIVATE ${Vulkan_INCLUDE_DIRS})
+
+target_link_libraries(${PROJECT_NAME} PRIVATE glfw ${Vulkan_LIBRARIES})

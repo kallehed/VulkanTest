@@ -301,10 +301,9 @@ int main() {
   }
 
   // get queue
+  VkQueue graphicsQueue, presentQueue;
   {
-    VkQueue graphicsQueue;
     vkGetDeviceQueue(device, queue_graphics_idx, 0, &graphicsQueue);
-    VkQueue presentQueue;
     vkGetDeviceQueue(device, queue_present_idx, 0, &presentQueue);
   }
 
@@ -629,6 +628,18 @@ int main() {
     renderPassInfo.subpassCount = 1;
     renderPassInfo.pSubpasses = &subpass;
 
+    VkSubpassDependency dependency{};
+    {
+      dependency.srcSubpass = VK_SUBPASS_EXTERNAL; // before
+      dependency.dstSubpass = 0; // this one
+      dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      dependency.srcAccessMask = 0;
+      dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    }
+    renderPassInfo.dependencyCount = 0;
+    renderPassInfo.pDependencies = &dependency;
+
     if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) !=
         VK_SUCCESS) {
       printf("ERROR: could not create render pass!\n");
@@ -692,13 +703,151 @@ int main() {
     }
   }
 
+  // create command pool, where we can have buffers later
+  VkCommandPool commandPool;
+  {
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    // allow command buffers to be rerecorded individually
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = queue_graphics_idx;
+
+    if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) !=
+        VK_SUCCESS) {
+      printf("ERROR: could not create command pool for graphics\n");
+    }
+  }
+  // Create command buffer
+  VkCommandBuffer commandBuffer;
+  {
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = commandPool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+
+    if (vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer) !=
+        VK_SUCCESS) {
+      printf("ERROR: failed to allocate commmand buffer in pool\n");
+    }
+  }
+
+  // create semaphores
+  VkSemaphore imageAvailableSemaphore;
+  VkSemaphore renderFinishedSemaphore;
+  VkFence inFlightFence;
+  {
+    VkSemaphoreCreateInfo semaphoreInfo{};
+    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    if (vkCreateSemaphore(device, &semaphoreInfo, nullptr,
+                          &imageAvailableSemaphore) != VK_SUCCESS ||
+        vkCreateSemaphore(device, &semaphoreInfo, nullptr,
+                          &renderFinishedSemaphore) != VK_SUCCESS ||
+        vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence) !=
+            VK_SUCCESS) {
+      printf("ERROR: could not create semaphores!\n");
+    }
+  }
+
   glm::mat4 matrix;
   glm::vec4 vec;
   auto test = matrix * vec;
 
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
+
+    // draw
+    {
+      // wait for the previous frame to be rendered
+      vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+      vkResetFences(device, 1, &inFlightFence);
+
+      // get image from swapchain
+      uint32_t imageIndex;
+      vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
+                            imageAvailableSemaphore, VK_NULL_HANDLE,
+                            &imageIndex);
+
+      // record command buffer
+      vkResetCommandBuffer(commandBuffer, 0);
+      // record to command buffer
+      uint32_t cur_frame_buffer = imageIndex;
+      {
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = 0;
+        beginInfo.pInheritanceInfo = NULL;
+        if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+          printf("ERROR: could not begin command buffer\n");
+        }
+
+        // begin render pass
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = renderPass;
+        renderPassInfo.framebuffer = swapchainFramebuffers[cur_frame_buffer];
+        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.extent = our_extent;
+
+        VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
+        renderPassInfo.clearValueCount = 1;
+        renderPassInfo.pClearValues = &clearColor;
+
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo,
+                             VK_SUBPASS_CONTENTS_INLINE);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          graphicsPipeline);
+
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
+        vkCmdEndRenderPass(commandBuffer);
+
+        if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+          printf("ERROR: failed to end comman buffer!\n");
+        }
+      }
+      // submit command buffer
+      VkSubmitInfo submitInfo{};
+      {
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        VkPipelineStageFlags waitFlag =
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        submitInfo.waitSemaphoreCount = 1;
+        submitInfo.pWaitSemaphores = &imageAvailableSemaphore;
+        submitInfo.pWaitDstStageMask = &waitFlag;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+        // make the render signal when it's done rendering
+        submitInfo.signalSemaphoreCount = 1;
+        submitInfo.pSignalSemaphores = &renderFinishedSemaphore;
+        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence) !=
+            VK_SUCCESS) {
+          printf("ERROR: Could not submit command buffer to command graphics "
+                 "queue!\n");
+        }
+      }
+      VkPresentInfoKHR presentInfo{};
+      {
+        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        presentInfo.waitSemaphoreCount = 1;
+        presentInfo.pWaitSemaphores = &renderFinishedSemaphore;
+        presentInfo.swapchainCount = 1;
+        presentInfo.pSwapchains = &swapchain;
+        presentInfo.pImageIndices = &imageIndex;
+      }
+
+      vkQueuePresentKHR(presentQueue, &presentInfo);
+    }
   }
+  vkDeviceWaitIdle(device);
 
   for (uint32_t i = 0; i < imageCount; ++i) {
     vkDestroyFramebuffer(device, swapchainFramebuffers[i], nullptr);
@@ -708,6 +857,10 @@ int main() {
     vkDestroyImageView(device, image_views[i], nullptr);
   }
 
+  vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
+  vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
+  vkDestroyFence(device, inFlightFence, nullptr);
+  vkDestroyCommandPool(device, commandPool, nullptr);
   vkDestroyPipeline(device, graphicsPipeline, nullptr);
   vkDestroyRenderPass(device, renderPass, nullptr);
   vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
