@@ -1,4 +1,5 @@
 #include <alloca.h>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <glm/common.hpp>
@@ -90,7 +91,29 @@ struct MyVk {
   static const uint32_t dynamicStateCount = 2;
   VkPipelineViewportStateCreateInfo viewportState{};
   VkDynamicState dynamicStates[dynamicStateCount];
+
+  VkRenderPass renderPass;
+  VkFramebuffer *swapchainFramebuffers;
+
+  VkPipelineLayout pipelineLayout{};
+
+  VkPipeline graphicsPipeline;
+
+  VkCommandPool commandPool;
+  VkCommandBuffer *commandBuffers;
+
+  VkSemaphore *imageAvailableSemaphores;
+  VkSemaphore *renderFinishedSemaphores;
+  VkFence *inFlightFences;
+
+  uint32_t currentFrame = 0; // what frame we are rendering
+  bool framebuffer_resized = false;
 };
+
+void framebuffer_resize_callback(GLFWwindow *window, int width, int height) {
+  MyVk *m = (MyVk *)glfwGetWindowUserPointer(window);
+  m->framebuffer_resized = true;
+}
 
 void my_vk_create_window(MyVk *m) {
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -98,6 +121,8 @@ void my_vk_create_window(MyVk *m) {
   // glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 1); // Set major version to 1
   // glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3); // Set minor version to 3
   m->window = glfwCreateWindow(800, 600, APPLICATION_NAME, nullptr, nullptr);
+  glfwSetWindowUserPointer(m->window, m);
+  glfwSetFramebufferSizeCallback(m->window, framebuffer_resize_callback);
 }
 
 void my_vk_create_instance(MyVk *m) {
@@ -358,7 +383,41 @@ void my_vk_get_capabilites(MyVk *m) {
                                             &m->capabilites);
 }
 
-void my_vk_init_swapchain(MyVk *m) {
+void my_vk_create_extent(MyVk *m) {
+  // choose swap extent (resolution in pixels of swap buffer)
+  printf(
+      "Range of swap extent: min wh: %d, %d, cur wh: %d, %d, max wh: %d "
+      "%d\n. minImageCount: %d, maxImageCount: %d\n",
+      m->capabilites.minImageExtent.width, m->capabilites.minImageExtent.height,
+      m->capabilites.currentExtent.width, m->capabilites.currentExtent.height,
+      m->capabilites.maxImageExtent.width, m->capabilites.maxImageExtent.height,
+      m->capabilites.minImageCount, m->capabilites.maxImageCount);
+  if (m->capabilites.currentExtent.width != UINT32_MAX) {
+    m->extent = m->capabilites.currentExtent;
+  } else {
+    // if we got 0xFFFFF... then we can choose the pixel amount that fits us
+    uint32_t width, height;
+    glfwGetFramebufferSize(m->window, (int *)&width, (int *)&height);
+    if (width < m->capabilites.minImageExtent.width) {
+      width = m->capabilites.minImageExtent.width;
+    }
+    if (width > m->capabilites.maxImageExtent.width) {
+      width = m->capabilites.maxImageExtent.width;
+    }
+    if (height < m->capabilites.minImageExtent.height) {
+      height = m->capabilites.minImageExtent.height;
+    }
+    if (height > m->capabilites.maxImageExtent.height) {
+      height = m->capabilites.maxImageExtent.height;
+    }
+    m->extent = VkExtent2D{width, height};
+  }
+}
+
+void my_vk_create_swapchain(MyVk *m) {
+  my_vk_get_capabilites(m);
+  my_vk_create_extent(m);
+
   // create actual swap chain
   m->swapchain_images_count = m->capabilites.minImageCount + 1;
   // select image count for swapchain buffering
@@ -408,37 +467,6 @@ void my_vk_init_swapchain(MyVk *m) {
   vkGetSwapchainImagesKHR(m->device, m->swapchain, &m->swapchain_images_count,
                           m->swapchain_images);
   printf("created %d swapchain images\n", m->swapchain_images_count);
-}
-
-void my_vk_create_extent(MyVk *m) {
-  // choose swap extent (resolution in pixels of swap buffer)
-  printf(
-      "Range of swap extent: min wh: %d, %d, cur wh: %d, %d, max wh: %d "
-      "%d\n. minImageCount: %d, maxImageCount: %d\n",
-      m->capabilites.minImageExtent.width, m->capabilites.minImageExtent.height,
-      m->capabilites.currentExtent.width, m->capabilites.currentExtent.height,
-      m->capabilites.maxImageExtent.width, m->capabilites.maxImageExtent.height,
-      m->capabilites.minImageCount, m->capabilites.maxImageCount);
-  if (m->capabilites.currentExtent.width != UINT32_MAX) {
-    m->extent = m->capabilites.currentExtent;
-  } else {
-    // if we got 0xFFFFF... then we can choose the pixel amount that fits us
-    uint32_t width, height;
-    glfwGetFramebufferSize(m->window, (int *)&width, (int *)&height);
-    if (width < m->capabilites.minImageExtent.width) {
-      width = m->capabilites.minImageExtent.width;
-    }
-    if (width > m->capabilites.maxImageExtent.width) {
-      width = m->capabilites.maxImageExtent.width;
-    }
-    if (height < m->capabilites.minImageExtent.height) {
-      height = m->capabilites.minImageExtent.height;
-    }
-    if (height > m->capabilites.maxImageExtent.height) {
-      height = m->capabilites.maxImageExtent.height;
-    }
-    m->extent = VkExtent2D{width, height};
-  }
 }
 
 void my_vk_create_queues(MyVk *m) {
@@ -518,33 +546,15 @@ void my_vk_create_dynamic_state(MyVk *m) {
   m->scissor.offset = {0, 0};
   m->scissor.extent = m->extent;
 
-  m->viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  m->viewportState.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
   m->viewportState.viewportCount = 1;
   m->viewportState.pViewports = &m->viewport;
   m->viewportState.scissorCount = 1;
   m->viewportState.pScissors = &m->scissor;
 }
 
-int main() {
-  glfwInit();
-
-  {
-    uint32_t extensionCount = 0;
-    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
-
-    printf("%d extensions supported\n", extensionCount);
-    VkExtensionProperties *extensions = (VkExtensionProperties *)malloc(
-        sizeof(VkExtensionProperties) * extensionCount);
-    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount,
-                                           extensions);
-
-    for (unsigned int i = 0; i < extensionCount; ++i) {
-      printf("extension: `%s` with ver: `%d`\n", extensions[i].extensionName,
-             extensions[i].specVersion);
-    }
-    free(extensions);
-  }
-
+void my_vk_create_render_pipeline(MyVk *m) {
   // vertex input
   VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
   {
@@ -615,7 +625,6 @@ int main() {
   }
 
   // pipeline layout, for uniforms
-  VkPipelineLayout pipelineLayout{};
   {
     VkPipelineLayoutCreateInfo pipeInfo{};
     pipeInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -624,17 +633,16 @@ int main() {
     pipeInfo.pushConstantRangeCount = 0;
     pipeInfo.pPushConstantRanges = nullptr;
 
-    if (vkCreatePipelineLayout(device, &pipeInfo, nullptr, &pipelineLayout) !=
-        VK_SUCCESS) {
+    if (vkCreatePipelineLayout(m->device, &pipeInfo, nullptr,
+                               &m->pipelineLayout) != VK_SUCCESS) {
       printf("ERROR: failed to create pipeline layout!\n");
     }
   }
 
   // render passes
-  VkRenderPass renderPass;
   {
     VkAttachmentDescription colorAttachment{};
-    colorAttachment.format = format.format;
+    colorAttachment.format = m->format.format;
     colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
     colorAttachment.loadOp =
         VK_ATTACHMENT_LOAD_OP_CLEAR; // clear buffer to black after drawing it
@@ -674,268 +682,342 @@ int main() {
     renderPassInfo.dependencyCount = 0;
     renderPassInfo.pDependencies = &dependency;
 
-    if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) !=
-        VK_SUCCESS) {
+    if (vkCreateRenderPass(m->device, &renderPassInfo, nullptr,
+                           &m->renderPass) != VK_SUCCESS) {
       printf("ERROR: could not create render pass!\n");
     }
   }
 
   // create graphics pipeline
-  VkPipeline graphicsPipeline;
   {
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipelineInfo.stageCount = 2; // vert and frag
-    pipelineInfo.pStages = shaderStages;
+    pipelineInfo.pStages = m->shaderStages;
 
     pipelineInfo.pVertexInputState = &vertexInputInfo;
     pipelineInfo.pInputAssemblyState = &inputAssembly;
-    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pViewportState = &m->viewportState;
     pipelineInfo.pRasterizationState = &rasterizer;
     pipelineInfo.pMultisampleState = &multisampling;
     pipelineInfo.pDepthStencilState = nullptr;
     pipelineInfo.pColorBlendState = &colorBlending;
-    pipelineInfo.pDynamicState = &dstate;
+    pipelineInfo.pDynamicState = &m->dstate;
 
-    pipelineInfo.layout = pipelineLayout; // lives longer
-    pipelineInfo.renderPass = renderPass;
+    pipelineInfo.layout = m->pipelineLayout; // lives longer
+    pipelineInfo.renderPass = m->renderPass;
     pipelineInfo.subpass = 0; // idx of subpass that renders
                               //
     pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // derive from
     pipelineInfo.basePipelineIndex = -1;
 
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo,
-                                  nullptr, &graphicsPipeline) != VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(m->device, VK_NULL_HANDLE, 1, &pipelineInfo,
+                                  nullptr,
+                                  &m->graphicsPipeline) != VK_SUCCESS) {
       printf("ERROR: could not create graphics pipeline!\n");
     }
     // destroy shader modules
-    vkDestroyShaderModule(device, frag_shader_module, nullptr);
-    vkDestroyShaderModule(device, vert_shader_module, nullptr);
+    vkDestroyShaderModule(m->device, m->frag_shader_module, nullptr);
+    vkDestroyShaderModule(m->device, m->vert_shader_module, nullptr);
   }
+}
 
+void my_vk_create_swapchain_framebuffers(MyVk *m) {
   // create VkFramebuffer objects
-  VkFramebuffer *swapchainFramebuffers;
-  {
-    swapchainFramebuffers =
-        (VkFramebuffer *)malloc(sizeof(VkFramebuffer) * imageCount);
+  m->swapchainFramebuffers = (VkFramebuffer *)malloc(sizeof(VkFramebuffer) *
+                                                     m->swapchain_images_count);
 
-    for (uint32_t i = 0; i < imageCount; ++i) {
+  for (uint32_t i = 0; i < m->swapchain_images_count; ++i) {
 
-      VkFramebufferCreateInfo framebufferInfo{};
-      framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-      framebufferInfo.renderPass = renderPass;
-      framebufferInfo.attachmentCount = 1;
-      framebufferInfo.pAttachments = &image_views[i];
-      framebufferInfo.width = our_extent.width;
-      framebufferInfo.height = our_extent.height;
-      framebufferInfo.layers = 1;
+    VkFramebufferCreateInfo framebufferInfo{};
+    framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebufferInfo.renderPass = m->renderPass;
+    framebufferInfo.attachmentCount = 1;
+    framebufferInfo.pAttachments = &m->image_views[i];
+    framebufferInfo.width = m->extent.width;
+    framebufferInfo.height = m->extent.height;
+    framebufferInfo.layers = 1;
 
-      if (vkCreateFramebuffer(device, &framebufferInfo, nullptr,
-                              &swapchainFramebuffers[i]) != VK_SUCCESS) {
-        printf("ERROR: failed to create nbr %i framebuffer!\n", i);
-      }
+    if (vkCreateFramebuffer(m->device, &framebufferInfo, nullptr,
+                            &m->swapchainFramebuffers[i]) != VK_SUCCESS) {
+      printf("ERROR: failed to create nbr %i framebuffer!\n", i);
     }
   }
+}
 
+void my_vk_create_command_pool(MyVk *m) {
   // create command pool, where we can have buffers later
-  VkCommandPool commandPool;
-  {
-    VkCommandPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    // allow command buffers to be rerecorded individually
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    poolInfo.queueFamilyIndex = queue_graphics_idx;
+  VkCommandPoolCreateInfo poolInfo{};
+  poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+  // allow command buffers to be rerecorded individually
+  poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+  poolInfo.queueFamilyIndex = m->queue_graphics_idx;
 
-    if (vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool) !=
-        VK_SUCCESS) {
-      printf("ERROR: could not create command pool for graphics\n");
-    }
+  if (vkCreateCommandPool(m->device, &poolInfo, nullptr, &m->commandPool) !=
+      VK_SUCCESS) {
+    printf("ERROR: could not create command pool for graphics\n");
   }
+}
 
+void my_vk_create_command_buffers(MyVk *m) {
   // Create command buffer
-  VkCommandBuffer *commandBuffers;
-  {
-    commandBuffers = (VkCommandBuffer *)malloc(sizeof(VkCommandBuffer) *
-                                               MAX_FRAMES_IN_FLIGHT);
-    VkCommandBufferAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = commandPool;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
+  m->commandBuffers =
+      (VkCommandBuffer *)malloc(sizeof(VkCommandBuffer) * MAX_FRAMES_IN_FLIGHT);
+  VkCommandBufferAllocateInfo allocInfo{};
+  allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+  allocInfo.commandPool = m->commandPool;
+  allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  allocInfo.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
 
-    if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers) !=
-        VK_SUCCESS) {
-      printf("ERROR: failed to allocate commmand buffers in pool\n");
-    }
+  if (vkAllocateCommandBuffers(m->device, &allocInfo, m->commandBuffers) !=
+      VK_SUCCESS) {
+    printf("ERROR: failed to allocate commmand buffers in pool\n");
   }
+}
 
+void my_vk_create_semaphores(MyVk *m) {
   // create semaphores
-  VkSemaphore *imageAvailableSemaphores;
-  VkSemaphore *renderFinishedSemaphores;
-  VkFence *inFlightFences;
-  {
-    imageAvailableSemaphores =
-        (VkSemaphore *)malloc(sizeof(VkSemaphore) * MAX_FRAMES_IN_FLIGHT);
-    renderFinishedSemaphores =
-        (VkSemaphore *)malloc(sizeof(VkSemaphore) * MAX_FRAMES_IN_FLIGHT);
-    inFlightFences = (VkFence *)malloc(sizeof(VkFence) * MAX_FRAMES_IN_FLIGHT);
+  m->imageAvailableSemaphores =
+      (VkSemaphore *)malloc(sizeof(VkSemaphore) * MAX_FRAMES_IN_FLIGHT);
+  m->renderFinishedSemaphores =
+      (VkSemaphore *)malloc(sizeof(VkSemaphore) * MAX_FRAMES_IN_FLIGHT);
+  m->inFlightFences = (VkFence *)malloc(sizeof(VkFence) * MAX_FRAMES_IN_FLIGHT);
 
-    // reuse these create info structs
-    VkSemaphoreCreateInfo semaphoreInfo{};
-    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+  // reuse these create info structs
+  VkSemaphoreCreateInfo semaphoreInfo{};
+  semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
-    VkFenceCreateInfo fenceInfo{};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+  VkFenceCreateInfo fenceInfo{};
+  fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+  fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+  for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
 
-      if (vkCreateSemaphore(device, &semaphoreInfo, nullptr,
-                            &imageAvailableSemaphores[i]) != VK_SUCCESS ||
-          vkCreateSemaphore(device, &semaphoreInfo, nullptr,
-                            &renderFinishedSemaphores[i]) != VK_SUCCESS ||
-          vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) !=
-              VK_SUCCESS) {
-        printf("ERROR: could not create semaphores!\n");
-      }
+    if (vkCreateSemaphore(m->device, &semaphoreInfo, nullptr,
+                          &m->imageAvailableSemaphores[i]) != VK_SUCCESS ||
+        vkCreateSemaphore(m->device, &semaphoreInfo, nullptr,
+                          &m->renderFinishedSemaphores[i]) != VK_SUCCESS ||
+        vkCreateFence(m->device, &fenceInfo, nullptr, &m->inFlightFences[i]) !=
+            VK_SUCCESS) {
+      printf("ERROR: could not create semaphores!\n");
     }
   }
+}
+
+void my_vk_deinit_swapchain(MyVk *m) {
+  for (uint32_t i = 0; i < m->swapchain_images_count; ++i) {
+    vkDestroyFramebuffer(m->device, m->swapchainFramebuffers[i], nullptr);
+  }
+
+  for (uint32_t i = 0; i < m->swapchain_images_count; ++i) {
+    vkDestroyImageView(m->device, m->image_views[i], nullptr);
+  }
+  vkDestroySwapchainKHR(m->device, m->swapchain, nullptr);
+  free(m->swapchainFramebuffers);
+  free(m->image_views);
+}
+
+void my_vk_recreate_swapchain(MyVk *m) {
+
+  int width = 0, height = 0;
+  glfwGetFramebufferSize(m->window, &width, &height);
+  while (width == 0 || height == 0) { // handle minimization
+    glfwGetFramebufferSize(m->window, &width, &height);
+    glfwWaitEvents();
+  }
+
+  vkDeviceWaitIdle(m->device);
+
+  my_vk_deinit_swapchain(m);
+
+  my_vk_create_swapchain(m);
+  my_vk_create_image_views(m);
+  my_vk_create_swapchain_framebuffers(m);
+}
+
+void my_vk_draw(MyVk *m) {
+  // draw
+  // wait for the previous frame to be rendered
+  vkWaitForFences(m->device, 1, &m->inFlightFences[m->currentFrame], VK_TRUE,
+                  UINT64_MAX);
+
+  // get image from swapchain
+  uint32_t imageIndex;
+  {
+
+    VkResult res =
+        vkAcquireNextImageKHR(m->device, m->swapchain, UINT64_MAX,
+                              m->imageAvailableSemaphores[m->currentFrame],
+                              VK_NULL_HANDLE, &imageIndex);
+    if (res == VK_ERROR_OUT_OF_DATE_KHR) {
+      // recreate the swapchain
+      m->framebuffer_resized = false;
+      my_vk_recreate_swapchain(m);
+      return;
+    } else if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
+      printf("ERROR: Failed to acquire swap chain image!\n");
+    }
+  }
+  vkResetFences(m->device, 1, &m->inFlightFences[m->currentFrame]);
+
+  // record command buffer
+  vkResetCommandBuffer(m->commandBuffers[m->currentFrame], 0);
+  // record to command buffer
+  uint32_t cur_frame_buffer = imageIndex;
+  {
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = 0;
+    beginInfo.pInheritanceInfo = NULL;
+    if (vkBeginCommandBuffer(m->commandBuffers[m->currentFrame], &beginInfo) !=
+        VK_SUCCESS) {
+      printf("ERROR: could not begin command buffer\n");
+    }
+
+    // begin render pass
+    VkRenderPassBeginInfo renderPassInfo{};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = m->renderPass;
+    renderPassInfo.framebuffer = m->swapchainFramebuffers[cur_frame_buffer];
+    renderPassInfo.renderArea.offset = {0, 0};
+    renderPassInfo.renderArea.extent = m->extent;
+
+    VkClearValue clearColor = {
+        {{(float)fabs(sin(glfwGetTime())), 0.0f, 0.0f, 1.0f}}};
+    renderPassInfo.clearValueCount = 1;
+    renderPassInfo.pClearValues = &clearColor;
+
+    vkCmdBeginRenderPass(m->commandBuffers[m->currentFrame], &renderPassInfo,
+                         VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(m->commandBuffers[m->currentFrame],
+                      VK_PIPELINE_BIND_POINT_GRAPHICS, m->graphicsPipeline);
+
+    vkCmdSetViewport(m->commandBuffers[m->currentFrame], 0, 1, &m->viewport);
+    vkCmdSetScissor(m->commandBuffers[m->currentFrame], 0, 1, &m->scissor);
+
+    vkCmdDraw(m->commandBuffers[m->currentFrame], 3, 1, 0, 0);
+
+    vkCmdEndRenderPass(m->commandBuffers[m->currentFrame]);
+
+    if (vkEndCommandBuffer(m->commandBuffers[m->currentFrame]) != VK_SUCCESS) {
+      printf("ERROR: failed to end comman buffer!\n");
+    }
+  }
+  // submit command buffer
+  VkSubmitInfo submitInfo{};
+  {
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    VkPipelineStageFlags waitFlag =
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = &m->imageAvailableSemaphores[m->currentFrame];
+    submitInfo.pWaitDstStageMask = &waitFlag;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &m->commandBuffers[m->currentFrame];
+    // make the render signal when it's done rendering
+    submitInfo.signalSemaphoreCount = 1;
+    submitInfo.pSignalSemaphores =
+        &m->renderFinishedSemaphores[m->currentFrame];
+    if (vkQueueSubmit(m->graphicsQueue, 1, &submitInfo,
+                      m->inFlightFences[m->currentFrame]) != VK_SUCCESS) {
+      printf("ERROR: Could not submit command buffer to command graphics "
+             "queue!\n");
+    }
+  }
+  VkPresentInfoKHR presentInfo{};
+  {
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = &m->renderFinishedSemaphores[m->currentFrame];
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = &m->swapchain;
+    presentInfo.pImageIndices = &imageIndex;
+  }
+
+  VkResult res = vkQueuePresentKHR(m->presentQueue, &presentInfo);
+  // TODO : adding the out commented check made it change swapchain twice for
+  // every resize, fix somehow? this solution will possibly not work on all
+  // devices
+  if (res == VK_ERROR_OUT_OF_DATE_KHR ||
+      res == VK_SUBOPTIMAL_KHR /* || m->framebuffer_resized  */) {
+    // recreate the swapchain
+    m->framebuffer_resized = false;
+    my_vk_recreate_swapchain(m);
+    return;
+  } else if (res != VK_SUCCESS) {
+    printf("ERROR: failed to queue present KHR!\n");
+  }
+
+  m->currentFrame = (m->currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+}
+
+int main() {
+  glfwInit();
+
+  {
+    uint32_t extensionCount = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount, nullptr);
+
+    printf("%d extensions supported\n", extensionCount);
+    VkExtensionProperties *extensions = (VkExtensionProperties *)malloc(
+        sizeof(VkExtensionProperties) * extensionCount);
+    vkEnumerateInstanceExtensionProperties(nullptr, &extensionCount,
+                                           extensions);
+
+    for (unsigned int i = 0; i < extensionCount; ++i) {
+      printf("extension: `%s` with ver: `%d`\n", extensions[i].extensionName,
+             extensions[i].specVersion);
+    }
+    free(extensions);
+  }
+
+  MyVk my_vk{};
+  MyVk *m = &my_vk;
+
+  my_vk_create_window(m);
+  my_vk_create_instance(m);
+  my_vk_create_surface(m);
+  my_vk_create_phys_device(m);
+  my_vk_get_queue_indices(m);
+  my_vk_create_device(m);
+  my_vk_create_swapchain(m);
+  my_vk_create_queues(m);
+  my_vk_create_image_views(m);
+  my_vk_create_shader_modules(m);
+  my_vk_create_dynamic_state(m);
+  my_vk_create_render_pipeline(m);
+  my_vk_create_swapchain_framebuffers(m);
+  my_vk_create_command_pool(m);
+  my_vk_create_command_buffers(m);
+  my_vk_create_semaphores(m);
 
   glm::mat4 matrix;
   glm::vec4 vec;
   auto test = matrix * vec;
 
-  // what frame we are rendering
-  uint32_t currentFrame = 0;
-
-  while (!glfwWindowShouldClose(window)) {
+  while (!glfwWindowShouldClose(m->window)) {
     glfwPollEvents();
 
-    // draw
-    {
-      // wait for the previous frame to be rendered
-      vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE,
-                      UINT64_MAX);
-      vkResetFences(device, 1, &inFlightFences[currentFrame]);
-
-      // get image from swapchain
-      uint32_t imageIndex;
-      {
-
-        VkResult res =
-            vkAcquireNextImageKHR(device, swapchain, UINT64_MAX,
-                                  imageAvailableSemaphores[currentFrame],
-                                  VK_NULL_HANDLE, &imageIndex);
-        if (res == VK_ERROR_OUT_OF_DATE_KHR) {
-          // recreate the swapchain
-          return 0;
-
-        } else if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
-          printf("ERROR: Failed to acquire swap chain image!\n");
-        }
-      }
-
-      // record command buffer
-      vkResetCommandBuffer(commandBuffers[currentFrame], 0);
-      // record to command buffer
-      uint32_t cur_frame_buffer = imageIndex;
-      {
-        VkCommandBufferBeginInfo beginInfo{};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = 0;
-        beginInfo.pInheritanceInfo = NULL;
-        if (vkBeginCommandBuffer(commandBuffers[currentFrame], &beginInfo) !=
-            VK_SUCCESS) {
-          printf("ERROR: could not begin command buffer\n");
-        }
-
-        // begin render pass
-        VkRenderPassBeginInfo renderPassInfo{};
-        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        renderPassInfo.renderPass = renderPass;
-        renderPassInfo.framebuffer = swapchainFramebuffers[cur_frame_buffer];
-        renderPassInfo.renderArea.offset = {0, 0};
-        renderPassInfo.renderArea.extent = our_extent;
-
-        VkClearValue clearColor = {
-            {{(float)fabs(sin(glfwGetTime())), 0.0f, 0.0f, 1.0f}}};
-        renderPassInfo.clearValueCount = 1;
-        renderPassInfo.pClearValues = &clearColor;
-
-        vkCmdBeginRenderPass(commandBuffers[currentFrame], &renderPassInfo,
-                             VK_SUBPASS_CONTENTS_INLINE);
-
-        vkCmdBindPipeline(commandBuffers[currentFrame],
-                          VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-
-        vkCmdSetViewport(commandBuffers[currentFrame], 0, 1, &viewport);
-        vkCmdSetScissor(commandBuffers[currentFrame], 0, 1, &scissor);
-
-        vkCmdDraw(commandBuffers[currentFrame], 3, 1, 0, 0);
-
-        vkCmdEndRenderPass(commandBuffers[currentFrame]);
-
-        if (vkEndCommandBuffer(commandBuffers[currentFrame]) != VK_SUCCESS) {
-          printf("ERROR: failed to end comman buffer!\n");
-        }
-      }
-      // submit command buffer
-      VkSubmitInfo submitInfo{};
-      {
-        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        VkPipelineStageFlags waitFlag =
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        submitInfo.waitSemaphoreCount = 1;
-        submitInfo.pWaitSemaphores = &imageAvailableSemaphores[currentFrame];
-        submitInfo.pWaitDstStageMask = &waitFlag;
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
-        // make the render signal when it's done rendering
-        submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = &renderFinishedSemaphores[currentFrame];
-        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo,
-                          inFlightFences[currentFrame]) != VK_SUCCESS) {
-          printf("ERROR: Could not submit command buffer to command graphics "
-                 "queue!\n");
-        }
-      }
-      VkPresentInfoKHR presentInfo{};
-      {
-        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-        presentInfo.waitSemaphoreCount = 1;
-        presentInfo.pWaitSemaphores = &renderFinishedSemaphores[currentFrame];
-        presentInfo.swapchainCount = 1;
-        presentInfo.pSwapchains = &swapchain;
-        presentInfo.pImageIndices = &imageIndex;
-      }
-
-      vkQueuePresentKHR(presentQueue, &presentInfo);
-      currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
-    }
+    my_vk_draw(m);
   }
-  vkDeviceWaitIdle(device);
+  // EXIT
+  vkDeviceWaitIdle(m->device);
 
-  for (uint32_t i = 0; i < imageCount; ++i) {
-    vkDestroyFramebuffer(device, swapchainFramebuffers[i], nullptr);
-  }
-
-  for (uint32_t i = 0; i < imageCount; ++i) {
-    vkDestroyImageView(device, image_views[i], nullptr);
-  }
+  my_vk_deinit_swapchain(m);
 
   for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-    vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
-    vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
-    vkDestroyFence(device, inFlightFences[i], nullptr);
+    vkDestroySemaphore(m->device, m->imageAvailableSemaphores[i], nullptr);
+    vkDestroySemaphore(m->device, m->renderFinishedSemaphores[i], nullptr);
+    vkDestroyFence(m->device, m->inFlightFences[i], nullptr);
   }
-  vkDestroyCommandPool(device, commandPool, nullptr);
-  vkDestroyPipeline(device, graphicsPipeline, nullptr);
-  vkDestroyRenderPass(device, renderPass, nullptr);
-  vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-  vkDestroySwapchainKHR(device, swapchain, nullptr);
-  vkDestroyDevice(device, nullptr);
-  vkDestroySurfaceKHR(instance, surface, nullptr);
-  vkDestroyInstance(instance, nullptr);
-  glfwDestroyWindow(window);
+  vkDestroyCommandPool(m->device, m->commandPool, nullptr);
+  vkDestroyPipeline(m->device, m->graphicsPipeline, nullptr);
+  vkDestroyRenderPass(m->device, m->renderPass, nullptr);
+  vkDestroyPipelineLayout(m->device, m->pipelineLayout, nullptr);
+  vkDestroyDevice(m->device, nullptr);
+  vkDestroySurfaceKHR(m->instance, m->surface, nullptr);
+  vkDestroyInstance(m->instance, nullptr);
+  glfwDestroyWindow(m->window);
   glfwTerminate();
 
   return 0;
